@@ -551,7 +551,7 @@ func (c *controller) sync(ctx context.Context) {
 		time.Sleep(c.options.scaleTimeout) // Give some time for all replicas before they receive hundreds req/s
 	}
 
-	c.populate(hashrings, statefulsets)
+	c.populate(ctx, hashrings, statefulsets)
 
 	if err := c.saveHashring(ctx, hashrings, cm); err != nil {
 		c.reconcileErrors.WithLabelValues(save).Inc()
@@ -586,12 +586,26 @@ func (c controller) waitForPod(ctx context.Context, name string) error {
 }
 
 //nolint:nestif
-func (c *controller) populate(hashrings []receive.HashringConfig, statefulsets map[string]*appsv1.StatefulSet) {
+func (c *controller) populate(ctx context.Context, hashrings []receive.HashringConfig, statefulsets map[string]*appsv1.StatefulSet) {
 	for i, h := range hashrings {
 		if sts, exists := statefulsets[h.Hashring]; exists {
 			var endpoints []string
 
 			for i := 0; i < int(*sts.Spec.Replicas); i++ {
+				// Do not add a replica to the hashring if pod is not Ready.
+				if c.options.allowOnlyReadyReplicas {
+					podName := fmt.Sprintf("%s-%d", sts.Name, i)
+					pod, err := c.klient.CoreV1().Pods(c.options.namespace).Get(ctx, podName, metav1.GetOptions{})
+
+					if kerrors.IsNotFound(err) {
+						continue
+					}
+
+					if !podutil.IsPodReady(pod) {
+						level.Warn(c.logger).Log("msg", "failed adding pod to hashring, pod not ready", "pod", podName, "err", err)
+						continue
+					}
+				}
 				// If cluster domain is empty string we don't want dot after svc.
 				clusterDomain := ""
 				if c.options.clusterDomain != "" {
